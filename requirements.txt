@@ -1,5 +1,14 @@
-fastapi==0.136.3
-uvicorn==0.48.0
-xgboost
-pandas==2.2.3
-numpy==2.2.6
+# Pin the libraries that affect model un-pickling to the EXACT training versions.
+# The Strict Audio model was trained/saved with scikit-learn 1.9.0 / numpy 2.4.x /
+# scipy 1.17.x / joblib 1.5.x. Loading it under a different scikit-learn version
+# may fail or warn, so keep scikit-learn pinned.
+scikit-learn==1.9.0
+numpy>=2.4,<3
+scipy>=1.17,<2
+joblib>=1.5
+
+# Web + audio
+Flask>=3.0.0
+gunicorn>=21.2.0
+librosa>=0.10.0
+soundfile>=0.12.1

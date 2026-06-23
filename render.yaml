@@ -1,0 +1,19 @@
+# Render deployment using Docker (recommended) for reliable MP3 decoding.
+# The Docker image installs ffmpeg + libsndfile so librosa can decode MP3 uploads.
+services:
+  - type: web
+    name: deezer-hit-predictor
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter            # the model needs RAM; free tier (512 MB) may be too small
+    healthCheckPath: /health
+    envVars:
+      - key: MAX_UPLOAD_MB
+        value: "20"
+      # If you do NOT commit the 145 MB model (recommended), host it and set MODEL_URL.
+      # The app downloads it once on first start into models/.
+      - key: MODEL_URL
+        sync: false
+      # Optional override of where the model is read from inside the container.
+      # - key: MODEL_PATH
+      #   value: /app/models/random_forest_deezer_10000_strict_audio_model.pkl

@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Temp uploads / scratch
+*.tmp
+tmp/
+uploads/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Large model artifacts (commit via Git LFS or host externally + MODEL_URL).
+# If you DO commit the model with Git LFS, remove the next line.
+models/*.pkl

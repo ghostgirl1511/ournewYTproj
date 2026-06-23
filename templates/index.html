@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Hit Predictor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <!-- subtle full-page background: soft gradient + faint audio waves -->
+  <div class="bg" aria-hidden="true">
+    <svg class="bg-waves" viewBox="0 0 1440 320" preserveAspectRatio="none">
+      <path d="M0,200 C240,120 480,280 720,200 C960,120 1200,280 1440,200 L1440,320 L0,320 Z" />
+      <path d="M0,240 C240,180 480,300 720,240 C960,180 1200,300 1440,240 L1440,320 L0,320 Z" />
+    </svg>
+  </div>
+
+  <main class="card">
+    <header class="head">
+      <span class="eyebrow">Audio popularity model</span>
+      <h1 class="title">THE HIT PREDICTOR</h1>
+      <p class="subtitle">Upload an MP3 file to receive an audio-based popularity prediction.</p>
+    </header>
+
+    {% if not model_ready %}
+      <div class="banner banner-warn">
+        The model is not loaded on the server yet, so uploads are paused for now.
+      </div>
+    {% endif %}
+
+    <form class="upload-form" action="{{ url_for('predict') }}" method="post"
+          enctype="multipart/form-data">
+      <label class="dropzone" for="audio">
+        <svg class="eq" viewBox="0 0 48 32" aria-hidden="true">
+          <rect x="2"  y="12" width="4" height="8"  rx="2"/>
+          <rect x="10" y="6"  width="4" height="20" rx="2"/>
+          <rect x="18" y="2"  width="4" height="28" rx="2"/>
+          <rect x="26" y="9"  width="4" height="14" rx="2"/>
+          <rect x="34" y="4"  width="4" height="24" rx="2"/>
+          <rect x="42" y="11" width="4" height="10" rx="2"/>
+        </svg>
+        <span class="dz-title">Choose an MP3 file</span>
+        <span class="dz-hint">Up to {{ max_mb }} MB. MP3 only.</span>
+        <input id="audio" name="audio" type="file" accept=".mp3,audio/mpeg" required />
+      </label>
+      <p id="filename" class="filename"></p>
+      <button class="btn" type="submit">Predict popularity</button>
+    </form>
+
+    <p class="explain">
+      We analyze the first 30 seconds of the uploaded track, convert it to mono at
+      22.05 kHz, and extract 93 audio features using librosa. The prediction is based
+      only on audio characteristics.
+    </p>
+
+    {% if error %}
+      <div class="banner banner-error">{{ error }}</div>
+    {% endif %}
+
+    {% if score is defined and score is not none %}
+      <section class="result">
+        <div class="result-label">Predicted popularity score</div>
+        <div class="result-score">
+          <span class="score-num">{{ (score * 100)|round|int }}%</span>
+        </div>
+        <div class="meter"><div class="meter-fill" style="width: {{ (score * 100)|round(1) }}%;"></div></div>
+        <div class="model-score">Model score: {{ "%.2f"|format(score) }} / 1.00</div>
+        <p class="disclaimer">
+          This percentage represents a relative popularity estimate based on audio
+          characteristics learned from the Deezer dataset. It is not a guaranteed
+          commercial success rate.
+        </p>
+      </section>
+    {% endif %}
+
+    <footer class="foot">Final Project | Audio-Based Song Popularity Prediction</footer>
+  </main>
+
+  <script>
+    const input = document.getElementById('audio');
+    const name = document.getElementById('filename');
+    if (input) {
+      input.addEventListener('change', () => {
+        name.textContent = input.files.length ? input.files[0].name : '';
+      });
+    }
+  </script>
+</body>
+</html>
