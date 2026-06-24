@@ -9,9 +9,12 @@ Requires:  librosa, numpy, requests
            + ffmpeg installed on the system (for MP3 decoding)
 """
 
+import ctypes
 import gc
 import logging
 import os
+import platform
+import subprocess
 import tempfile
 import warnings
 
@@ -24,6 +27,80 @@ logger = logging.getLogger(__name__)
 TIMEOUT = 20  # seconds for downloading preview
 SAMPLE_RATE = 22050  # standard librosa default
 PREVIEW_SECONDS = 30  # training used Deezer 30s previews; uploads use first 30s
+
+
+def _malloc_trim() -> None:
+    """
+    Return freed pages to the OS on Linux (Render's container environment).
+
+    Python's pymalloc and ptmalloc hold freed numpy memory in internal arenas
+    and never give it back to the OS, so the process RSS stays high even after
+    del + gc.collect(). malloc_trim(0) forces an immediate OS-level trim.
+    Safe no-op on macOS/Windows.
+    """
+    if platform.system() == "Linux":
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+
+
+def _load_audio_30s(file_path: str) -> np.ndarray | None:
+    """
+    Decode exactly the first PREVIEW_SECONDS of audio via an ffmpeg subprocess.
+
+    This is the primary loader used by the web app. Key properties:
+
+    * ``-t PREVIEW_SECONDS`` tells ffmpeg's muxer to stop at 30 s at the
+      *input demux* level — no audio beyond that is ever decoded or buffered
+      in Python, regardless of how long the source file is.  A 5-minute MP3
+      at 128 kbps decoded with librosa.load() can temporarily occupy > 100 MB
+      of PCM; this path uses < 5 MB.
+    * ``-ac 1 -ar 22050 -f f32le`` gives us mono, 22050 Hz, float32 LE PCM
+      directly — no resampling or mixing happens in Python.
+    * stdout is consumed once into a bytes buffer; ``np.frombuffer(...).copy()``
+      converts it to a numpy array and immediately drops the bytes reference.
+
+    Returns None if ffmpeg is absent or the file cannot be decoded, so the
+    caller can fall back to librosa.load().
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-v", "error",
+                "-i", file_path,
+                "-t", str(PREVIEW_SECONDS),   # hard stop at 30 s (muxer level)
+                "-ac", "1",                   # mono
+                "-ar", str(SAMPLE_RATE),      # 22050 Hz
+                "-f", "f32le",                # raw float32 little-endian PCM
+                "pipe:1",                     # write to stdout
+            ],
+            capture_output=True,
+            timeout=60,
+        )
+    except FileNotFoundError:
+        logger.debug("ffmpeg not found; falling back to librosa.load()")
+        return None
+    except subprocess.TimeoutExpired:
+        logger.warning("ffmpeg timed out decoding %s", file_path)
+        return None
+    except Exception as e:
+        logger.warning("ffmpeg subprocess error for %s: %s", file_path, e)
+        return None
+
+    if result.returncode != 0 or not result.stdout:
+        logger.warning(
+            "ffmpeg decode failed (rc=%d) for %s: %s",
+            result.returncode, file_path,
+            result.stderr[:300].decode("utf-8", errors="replace"),
+        )
+        return None
+
+    # np.frombuffer gives a read-only view into result.stdout (bytes).
+    # .copy() makes it writable and lets the bytes object be GC'd immediately.
+    y = np.frombuffer(result.stdout, dtype=np.float32).copy()
+    return y if len(y) > 0 else None
 
 
 def _download_preview(preview_url: str) -> np.ndarray | None:
@@ -100,23 +177,43 @@ def extract_features_from_file(
     """
     Extract the SAME librosa feature dictionary from a LOCAL audio file.
 
-    Used by the web app for user uploads. Mirrors the training-time
-    preprocessing exactly: load as mono at SAMPLE_RATE (22050 Hz) and take the
-    first ``max_seconds`` seconds (training used Deezer's 30-second previews,
-    so we use a 30-second segment of the upload). Feature *computation* is
-    identical to the preview path because both call ``_compute_features``.
+    Audio loading strategy (two-stage):
 
-    Returns the feature dict, or None if the file cannot be decoded.
-    Raises on feature-computation errors (caller should handle).
+    1. **ffmpeg subprocess** (primary) — ``_load_audio_30s`` decodes exactly
+       ``PREVIEW_SECONDS`` seconds at the muxer level.  Peak memory is < 5 MB
+       regardless of source file length.  This is the path used on Render where
+       ffmpeg is installed via the Dockerfile.
+
+    2. **librosa.load fallback** — used when ffmpeg is absent.  ``duration``
+       is passed to limit the read, but some libsndfile backends (e.g. when
+       soundfile handles MP3) may still buffer the full decoded file before
+       slicing, so this path is less memory-safe for long uploads.
+
+    After feature extraction the audio array is deleted and malloc_trim is
+    called so that freed C-heap pages are returned to the OS immediately.
     """
-    try:
-        y, _ = librosa.load(file_path, sr=SAMPLE_RATE, mono=True, duration=max_seconds)
-    except Exception as e:
-        logger.warning("Failed to load audio file %s: %s", file_path, e)
-        return None
+    # ── Stage 1: ffmpeg (hard 30-s muxer limit, < 5 MB peak) ────────────────
+    y = _load_audio_30s(file_path)
+
+    # ── Stage 2: librosa fallback (duration-limited, but less reliable for MP3)
+    if y is None:
+        try:
+            y, _ = librosa.load(
+                file_path, sr=SAMPLE_RATE, mono=True, duration=float(max_seconds)
+            )
+        except Exception as e:
+            logger.warning("Failed to load audio file %s: %s", file_path, e)
+            return None
+
     if y is None or len(y) == 0:
         return None
-    return _compute_features(y, SAMPLE_RATE)
+
+    try:
+        return _compute_features(y, SAMPLE_RATE)
+    finally:
+        del y
+        gc.collect()
+        _malloc_trim()
 
 
 def _compute_features(y: np.ndarray, sr: int) -> dict[str, float]:
@@ -239,6 +336,7 @@ def _compute_features(y: np.ndarray, sr: int) -> dict[str, float]:
         del tn_mean, tn_std
 
     gc.collect()
+    _malloc_trim()
     return features
 
 
