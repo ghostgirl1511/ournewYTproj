@@ -7,6 +7,7 @@ using the pre-trained Strict Audio Random-Forest model (93 librosa features).
 The Deezer API is NOT used at prediction time. No model is trained here.
 """
 
+import gc
 import json
 import logging
 import os
@@ -132,13 +133,26 @@ def _predict_from_upload(file_storage) -> float:
             logger.exception("Feature extraction crashed")
             raise PredictionError("Could not analyze this audio file. "
                                   "It may be corrupted or in an unsupported format.")
+        finally:
+            # Delete upload immediately after extraction — don't hold it on disk
+            # while the (heavier) model prediction runs.
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    logger.warning("Could not delete temp file %s", tmp_path)
+                finally:
+                    tmp_path = None
 
         if feats is None:
             raise PredictionError("Could not decode this audio file. Make sure it is "
                                   "a valid MP3 of at least a few seconds.")
 
         X = _build_feature_vector(feats)
+        del feats  # 93-key dict no longer needed once vector is built
         score = float(MODEL.predict(X)[0])
+        del X
+        gc.collect()
         return max(0.0, min(1.0, score))  # clip to [0, 1]
     finally:
         if tmp_path and os.path.exists(tmp_path):

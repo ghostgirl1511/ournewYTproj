@@ -9,11 +9,11 @@ Requires:  librosa, numpy, requests
            + ffmpeg installed on the system (for MP3 decoding)
 """
 
+import gc
 import logging
 import os
 import tempfile
 import warnings
-from typing import Any
 
 import librosa
 import numpy as np
@@ -127,6 +127,12 @@ def _compute_features(y: np.ndarray, sr: int) -> dict[str, float]:
     (``extract_features``) and the web-app upload path
     (``extract_features_from_file``). The feature names produced here are the
     exact set used to train the models.
+
+    Memory note: intermediate arrays are deleted immediately after use and
+    gc.collect() is called at natural boundaries to keep peak RSS low.
+    HPSS is run once and its outputs reused for both the harmonic/percussive
+    stats and tonnetz (effects.harmonic is just hpss()[0], so this is
+    numerically identical to the original and produces the same 93 features).
     """
     features: dict[str, float] = {}
 
@@ -135,75 +141,104 @@ def _compute_features(y: np.ndarray, sr: int) -> dict[str, float]:
 
         # ── MFCCs (13 coefficients) ──────────────────────────────────
         mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-        mfcc_mean, mfcc_std = _safe_mean_std(mfccs)
+        mfcc_mean = np.mean(mfccs, axis=1)
+        mfcc_std  = np.std(mfccs,  axis=1)
+        del mfccs
         for i in range(13):
             features[f"mfcc_{i+1}_mean"] = float(mfcc_mean[i])
-            features[f"mfcc_{i+1}_std"] = float(mfcc_std[i])
+            features[f"mfcc_{i+1}_std"]  = float(mfcc_std[i])
+        del mfcc_mean, mfcc_std
 
         # ── Chroma (12 pitch classes) ────────────────────────────────
         chroma = librosa.feature.chroma_stft(y=y, sr=sr)
-        chroma_mean, chroma_std = _safe_mean_std(chroma)
+        chroma_mean = np.mean(chroma, axis=1)
+        chroma_std  = np.std(chroma,  axis=1)
+        del chroma
         for i in range(12):
             features[f"chroma_{i+1}_mean"] = float(chroma_mean[i])
-            features[f"chroma_{i+1}_std"] = float(chroma_std[i])
+            features[f"chroma_{i+1}_std"]  = float(chroma_std[i])
+        del chroma_mean, chroma_std
+
+        gc.collect()
 
         # ── Spectral Centroid ────────────────────────────────────────
         spec_cent = librosa.feature.spectral_centroid(y=y, sr=sr)
         features["spectral_centroid_mean"] = float(np.mean(spec_cent))
-        features["spectral_centroid_std"] = float(np.std(spec_cent))
+        features["spectral_centroid_std"]  = float(np.std(spec_cent))
+        del spec_cent
 
         # ── Spectral Bandwidth ───────────────────────────────────────
         spec_bw = librosa.feature.spectral_bandwidth(y=y, sr=sr)
         features["spectral_bandwidth_mean"] = float(np.mean(spec_bw))
-        features["spectral_bandwidth_std"] = float(np.std(spec_bw))
+        features["spectral_bandwidth_std"]  = float(np.std(spec_bw))
+        del spec_bw
 
         # ── Spectral Rolloff ─────────────────────────────────────────
         spec_rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)
         features["spectral_rolloff_mean"] = float(np.mean(spec_rolloff))
-        features["spectral_rolloff_std"] = float(np.std(spec_rolloff))
+        features["spectral_rolloff_std"]  = float(np.std(spec_rolloff))
+        del spec_rolloff
 
         # ── Spectral Contrast (7 bands) ──────────────────────────────
         spec_contrast = librosa.feature.spectral_contrast(y=y, sr=sr)
-        sc_mean, sc_std = _safe_mean_std(spec_contrast)
+        sc_mean = np.mean(spec_contrast, axis=1)
+        sc_std  = np.std(spec_contrast,  axis=1)
+        del spec_contrast
         for i in range(len(sc_mean)):
             features[f"spectral_contrast_{i+1}_mean"] = float(sc_mean[i])
-            features[f"spectral_contrast_{i+1}_std"] = float(sc_std[i])
+            features[f"spectral_contrast_{i+1}_std"]  = float(sc_std[i])
+        del sc_mean, sc_std
 
         # ── Zero Crossing Rate ───────────────────────────────────────
         zcr = librosa.feature.zero_crossing_rate(y)
         features["zcr_mean"] = float(np.mean(zcr))
-        features["zcr_std"] = float(np.std(zcr))
+        features["zcr_std"]  = float(np.std(zcr))
+        del zcr
 
         # ── RMS Energy ───────────────────────────────────────────────
         rms = librosa.feature.rms(y=y)
         features["rms_mean"] = float(np.mean(rms))
-        features["rms_std"] = float(np.std(rms))
+        features["rms_std"]  = float(np.std(rms))
+        del rms
+
+        # ── Mel Spectrogram (summary) ────────────────────────────────
+        mel = librosa.feature.melspectrogram(y=y, sr=sr)
+        mel_db = librosa.power_to_db(mel, ref=np.max)
+        del mel
+        features["mel_mean"] = float(np.mean(mel_db))
+        features["mel_std"]  = float(np.std(mel_db))
+        del mel_db
+
+        gc.collect()
 
         # ── Tempo ────────────────────────────────────────────────────
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
         features["tempo"] = float(np.atleast_1d(tempo)[0])
 
+        # ── HPSS once — harmonic used for both tonnetz and harmonic stats ──
+        # effects.harmonic(y) is identical to hpss(y)[0]; running hpss once
+        # avoids a full duplicate STFT + median-filter + iSTFT cycle (~90 MB peak).
+        y_harm, y_perc = librosa.effects.hpss(y)
+
+        # ── Harmonic / Percussive stats ──────────────────────────────
+        features["harmonic_mean"]   = float(np.mean(np.abs(y_harm)))
+        features["harmonic_std"]    = float(np.std(np.abs(y_harm)))
+        features["percussive_mean"] = float(np.mean(np.abs(y_perc)))
+        features["percussive_std"]  = float(np.std(np.abs(y_perc)))
+        del y_perc
+
         # ── Tonnetz (6 tonal centroids) ──────────────────────────────
-        y_harmonic = librosa.effects.harmonic(y)
-        tonnetz = librosa.feature.tonnetz(y=y_harmonic, sr=sr)
-        tn_mean, tn_std = _safe_mean_std(tonnetz)
+        tonnetz = librosa.feature.tonnetz(y=y_harm, sr=sr)
+        del y_harm
+        tn_mean = np.mean(tonnetz, axis=1)
+        tn_std  = np.std(tonnetz,  axis=1)
+        del tonnetz
         for i in range(6):
             features[f"tonnetz_{i+1}_mean"] = float(tn_mean[i])
-            features[f"tonnetz_{i+1}_std"] = float(tn_std[i])
+            features[f"tonnetz_{i+1}_std"]  = float(tn_std[i])
+        del tn_mean, tn_std
 
-        # ── Mel Spectrogram (summary) ────────────────────────────────
-        mel = librosa.feature.melspectrogram(y=y, sr=sr)
-        mel_db = librosa.power_to_db(mel, ref=np.max)
-        features["mel_mean"] = float(np.mean(mel_db))
-        features["mel_std"] = float(np.std(mel_db))
-
-        # ── Harmonic / Percussive Ratio ──────────────────────────────
-        y_harm, y_perc = librosa.effects.hpss(y)
-        features["harmonic_mean"] = float(np.mean(np.abs(y_harm)))
-        features["harmonic_std"] = float(np.std(np.abs(y_harm)))
-        features["percussive_mean"] = float(np.mean(np.abs(y_perc)))
-        features["percussive_std"] = float(np.std(np.abs(y_perc)))
-
+    gc.collect()
     return features
 
 
