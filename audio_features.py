@@ -177,33 +177,18 @@ def extract_features_from_file(
     """
     Extract the SAME librosa feature dictionary from a LOCAL audio file.
 
-    Audio loading strategy (two-stage):
-
-    1. **ffmpeg subprocess** (primary) — ``_load_audio_30s`` decodes exactly
-       ``PREVIEW_SECONDS`` seconds at the muxer level.  Peak memory is < 5 MB
-       regardless of source file length.  This is the path used on Render where
-       ffmpeg is installed via the Dockerfile.
-
-    2. **librosa.load fallback** — used when ffmpeg is absent.  ``duration``
-       is passed to limit the read, but some libsndfile backends (e.g. when
-       soundfile handles MP3) may still buffer the full decoded file before
-       slicing, so this path is less memory-safe for long uploads.
-
-    After feature extraction the audio array is deleted and malloc_trim is
-    called so that freed C-heap pages are returned to the OS immediately.
+    Mirrors the training-time preprocessing exactly: load as mono at
+    SAMPLE_RATE (22050 Hz) via librosa/soxr_hq and take the first
+    ``max_seconds`` seconds (training used Deezer's 30-second previews).
+    Feature computation is identical to the preview path via ``_compute_features``.
     """
-    # ── Stage 1: ffmpeg (hard 30-s muxer limit, < 5 MB peak) ────────────────
-    y = _load_audio_30s(file_path)
-
-    # ── Stage 2: librosa fallback (duration-limited, but less reliable for MP3)
-    if y is None:
-        try:
-            y, _ = librosa.load(
-                file_path, sr=SAMPLE_RATE, mono=True, duration=float(max_seconds)
-            )
-        except Exception as e:
-            logger.warning("Failed to load audio file %s: %s", file_path, e)
-            return None
+    try:
+        y, _ = librosa.load(
+            file_path, sr=SAMPLE_RATE, mono=True, duration=float(max_seconds)
+        )
+    except Exception as e:
+        logger.warning("Failed to load audio file %s: %s", file_path, e)
+        return None
 
     if y is None or len(y) == 0:
         return None
